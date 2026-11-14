@@ -146,6 +146,9 @@ async fn proxy(State(state): State<AppState>, request: Request<Body>) -> Respons
     remove_hop_by_hop_headers(&mut headers);
     headers.remove(header::HOST);
     headers.remove(header::CONTENT_LENGTH);
+    if state.config.api_key.is_some() {
+        headers.remove(header::AUTHORIZATION);
+    }
 
     let upstream = match state
         .client
@@ -177,11 +180,25 @@ async fn proxy(State(state): State<AppState>, request: Request<Body>) -> Respons
 }
 
 fn has_bearer_key(headers: &HeaderMap, expected: &str) -> bool {
-    headers
+    let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|provided| provided == expected)
+    else {
+        return false;
+    };
+
+    let mut parts = value.split_whitespace();
+    let Some(scheme) = parts.next() else {
+        return false;
+    };
+    let Some(provided) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+
+    scheme.eq_ignore_ascii_case("Bearer") && provided == expected
 }
 
 fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {

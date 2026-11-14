@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "A fast Rust API gateway for vLLM OpenAI-compatible inference"
 
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"

@@ -93,6 +93,21 @@ async fn accepts_configured_bearer_key() {
 }
 
 #[tokio::test]
+async fn accepts_case_insensitive_bearer_scheme() {
+    let backend = spawn(Router::new().fallback(any(echo_backend))).await;
+    let gateway = spawn(api::router(config(backend, Some("secret"))).unwrap()).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{gateway}/v1/models"))
+        .header(header::AUTHORIZATION, "bearer secret")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn health_check_does_not_depend_on_backend() {
     let gateway = spawn(api::router(config("127.0.0.1:1".parse().unwrap(), None)).unwrap()).await;
 

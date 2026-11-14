@@ -28,11 +28,12 @@ flowchart LR
     Cargo["cargo run --release --bin infer"] --> CLI["Rust inference CLI<br/>Candle + tokenizer"]
     Model["models/SmolLM2-135M-Instruct<br/>local safetensors"] --> CLI
     CLI -->|"decode and flush generated text"| Terminal["Terminal"]
-    CLI -->|"CPU tensor operations"| CPU["Host CPU and RAM"]
+    CLI -->|"default or CUDA unavailable"| CPU["Host CPU and RAM"]
+    CLI -->|"optional CUDA build + working driver"| GPU
   end
 ```
 
-The serving path and direct local path are separate ways to run inference. In the serving path, Rust accepts and streams API requests while vLLM performs model inference. In the local path, the Rust `infer` executable loads the local model itself with Candle and runs one prompt directly on the CPU.
+The serving path and direct local path are separate ways to run inference. In the serving path, Rust accepts and streams API requests while vLLM performs model inference. In the local path, the Rust `infer` executable loads the local model itself with Candle and runs one prompt on the CPU by default, or on CUDA when built with the CUDA feature and explicitly selected/available.
 
 ## Requirements
 
@@ -149,20 +150,47 @@ The Axum gateway can handle multiple HTTP requests concurrently, and its shared 
 
 For the API path, vLLM schedules and batches simultaneous inference requests. How many it can serve efficiently depends on its version/configuration, model size and precision, prompt/context lengths, generation limits, GPU compute, and GPU memory—especially the KV cache used to retain attention state for active sequences. This repository leaves vLLM's scheduling limits at its defaults; `TENSOR_PARALLEL_SIZE` controls how a model is split across GPUs, not the number of concurrent requests. For production traffic, configure vLLM's sequence/token limits for the deployed version and consider adding gateway admission control or a request queue.
 
-The direct `infer` CLI is different: it handles one prompt per process, token by token. The current CLI uses the CPU, so GPU RAM is not its limiting resource; host RAM, compute speed, model weights, context size, and the KV cache matter. Starting multiple CLI processes can run multiple prompts, but each process loads its own model and cache and competes for system memory/CPU.
+The direct `infer` CLI is different: it handles one prompt per process, token by token. On CPU, host RAM and CPU compute are the limits; on CUDA, GPU RAM, GPU compute, model weights, context size, and the KV cache matter. Starting multiple CLI processes can run multiple prompts, but each process loads its own model and cache and competes for the corresponding system resources.
+
+## GPU setup and troubleshooting
+
+The API deployment uses vLLM's GPU-enabled container. The native Rust CLI uses Candle's optional CUDA backend, which must be compiled explicitly:
+
+1. Install a supported NVIDIA driver and CUDA Toolkit (including `nvcc`) for your operating system, plus a C++ compiler. Verify `nvidia-smi` and `nvcc --version` both work.
+2. Build and run the native CLI with `--features cuda --device cuda` as shown above. Use `--device auto` to attempt CUDA and fall back to CPU if unavailable. If compiling in a container where the GPU is not exposed at build time, set Candle's `CUDA_COMPUTE_CAP` to the GPU's compute capability (for example `86` for an RTX 3050) during compilation.
+3. For Docker/vLLM, install and configure NVIDIA Container Toolkit, then verify the GPU is visible inside a container before starting Compose:
+
+   ```bash
+   sudo nvidia-ctk runtime configure --runtime=docker
+   sudo systemctl restart docker
+   docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+   ```
+
+`nvidia-smi` must work on the host first. If it reports a driver/library version mismatch, the loaded kernel module and installed NVIDIA user-space libraries are out of sync; reinstall/complete the matching driver update and reboot before building or running CUDA inference. Docker must also be able to enumerate the GPU; otherwise the vLLM container cannot use it.
 
 ### Run the local model directly in Rust
 
-The local SmolLM2 model can also run entirely in Rust with Candle on CPU; this does not use Python or vLLM:
+The local SmolLM2 model can run directly in Rust with Candle. The default build uses CPU; build with `--features cuda` to enable GPU execution. With a CUDA-enabled binary, `--device auto` selects CUDA GPU 0 when available and otherwise falls back to CPU:
 
 ```bash
 cargo run --release --bin infer -- \
   --model models/SmolLM2-135M-Instruct \
   --prompt "What is 2 + 2? Reply with only the number." \
-  --max-new-tokens 24
+  --max-new-tokens 24 \
+  --device auto
 ```
 
-The default model path is the repository's `models/SmolLM2-135M-Instruct` folder. Tokens are decoded and flushed to the terminal as generation proceeds; the final incomplete word/punctuation is flushed when generation ends. Rust dependencies are downloaded and compiled on the first run; the tokenizer dependency requires a C++ compiler. The downloaded weights stay local and Git-ignored.
+To build the native CUDA backend, install the NVIDIA driver, CUDA Toolkit (including `nvcc`), and a C++ compiler, then build with Candle's CUDA feature:
+
+```bash
+cargo run --release --features cuda --bin infer -- \
+  --model models/SmolLM2-135M-Instruct \
+  --prompt "What is 2 + 2? Reply with only the number." \
+  --max-new-tokens 24 \
+  --device cuda
+```
+
+Use `--device cpu` to force CPU, `--device cuda` to require CUDA, or `--device auto` (the default) to try CUDA and fall back to CPU. The model path defaults to the repository's `models/SmolLM2-135M-Instruct` folder. Tokens are decoded and flushed to the terminal as generation proceeds; the final incomplete word/punctuation is flushed when generation ends. Rust dependencies are downloaded and compiled on the first run; the tokenizer dependency requires a C++ compiler. The downloaded weights stay local and Git-ignored.
 
 ## Local Hugging Face inference (CPU)
 

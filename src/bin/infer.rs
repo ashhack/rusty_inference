@@ -11,8 +11,16 @@ use candle_transformers::{
     generation::LogitsProcessor,
     models::llama::{Cache, Llama, LlamaConfig, LlamaEosToks},
 };
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tokenizers::Tokenizer;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum DeviceChoice {
+    #[default]
+    Auto,
+    Cpu,
+    Cuda,
+}
 
 #[derive(Debug, Parser)]
 #[command(about = "Run local SmolLM inference using the Rust Candle backend")]
@@ -34,6 +42,9 @@ struct Args {
 
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    #[arg(long, value_enum, default_value_t = DeviceChoice::Auto)]
+    device: DeviceChoice,
 }
 
 fn format_prompt(prompt: &str) -> String {
@@ -50,6 +61,30 @@ fn stable_text_end(text: &str) -> usize {
         .find(|(_, character)| character.is_alphanumeric())
         .map(|(index, character)| index + character.len_utf8())
         .unwrap_or(0)
+}
+
+fn select_device(choice: DeviceChoice) -> anyhow::Result<Device> {
+    match choice {
+        DeviceChoice::Cpu => Ok(Device::Cpu),
+        DeviceChoice::Cuda => select_cuda_device(),
+        DeviceChoice::Auto => match select_cuda_device() {
+            Ok(device) => Ok(device),
+            Err(error) => {
+                eprintln!("CUDA unavailable ({error:#}); falling back to CPU.");
+                Ok(Device::Cpu)
+            }
+        },
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn select_cuda_device() -> anyhow::Result<Device> {
+    Device::new_cuda(0).context("failed to initialize CUDA device 0")
+}
+
+#[cfg(not(feature = "cuda"))]
+fn select_cuda_device() -> anyhow::Result<Device> {
+    bail!("this binary was built without CUDA support; rebuild with `--features cuda`")
 }
 
 fn run(args: Args) -> anyhow::Result<()> {
@@ -79,7 +114,13 @@ fn run(args: Args) -> anyhow::Result<()> {
         bail!("the prompt produced no tokens");
     }
 
-    let device = Device::Cpu;
+    let device = select_device(args.device)?;
+    let device_name = if device.is_cuda() {
+        "CUDA GPU 0"
+    } else {
+        "CPU"
+    };
+    eprintln!("Running inference on {device_name}.");
     let llama_config: LlamaConfig = serde_json::from_slice(
         &std::fs::read(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?,
@@ -150,7 +191,7 @@ fn run(args: Args) -> anyhow::Result<()> {
     println!();
     io::stdout().flush()?;
     eprintln!(
-        "Generated {} tokens in {:.2}s ({:.2} tokens/s) on CPU",
+        "Generated {} tokens in {:.2}s ({:.2} tokens/s) on {device_name}",
         generated.len(),
         started.elapsed().as_secs_f64(),
         generated.len() as f64 / started.elapsed().as_secs_f64().max(f64::EPSILON),
@@ -164,7 +205,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_prompt, stable_text_end};
+    use super::{DeviceChoice, format_prompt, select_device, stable_text_end};
 
     #[test]
     fn formats_smol_chat_prompt() {
@@ -182,5 +223,18 @@ mod tests {
         let end = stable_text_end(text);
         assert_eq!(&text[..end], "Answer: café");
         assert!(text.is_char_boundary(end));
+    }
+
+    #[test]
+    fn cpu_device_can_be_selected() {
+        let device = select_device(DeviceChoice::Cpu).unwrap();
+        assert!(device.is_cpu());
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn cuda_selection_requires_cuda_feature() {
+        let error = select_device(DeviceChoice::Cuda).unwrap_err();
+        assert!(error.to_string().contains("built without CUDA support"));
     }
 }
